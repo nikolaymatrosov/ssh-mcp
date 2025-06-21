@@ -129,21 +129,21 @@ func TestSSHConnection(t *testing.T) {
 // Helper functions to interact with the SSH MCP tool
 
 // getClient returns a new MCP client
-func getClient() *MCPClient {
+func getClient(ctx context.Context) *MCPClient {
 	// The baseURL should point to the SSH MCP server
 	// When running in the dev container, the app service can access the SSH MCP server at http://localhost:8081
-	return NewMCPClient("http://localhost:8081/mcp")
+	return NewMCPClient(ctx, "http://localhost:8081/mcp")
 }
 
 func connectToSSH(t *testing.T, host string, port int) (string, error) {
 	t.Logf("Connecting to SSH server at %s:%d...", host, port)
-	client := getClient()
+	client := getClient(t.Context())
 	return client.SSHConnect(host, port, sshUser, sshPassword)
 }
 
 func executeCommand(t *testing.T, sessionID, command string) error {
 	t.Logf("Executing command: %s", command)
-	client := getClient()
+	client := getClient(t.Context())
 	output, err := client.SSHExecuteCommand(sessionID, command)
 	if err != nil {
 		return err
@@ -154,19 +154,19 @@ func executeCommand(t *testing.T, sessionID, command string) error {
 
 func uploadFile(t *testing.T, sessionID, localPath, remotePath string) error {
 	t.Logf("Uploading file from %s to %s", localPath, remotePath)
-	client := getClient()
+	client := getClient(t.Context())
 	return client.SSHUploadFile(sessionID, localPath, remotePath)
 }
 
 func downloadFile(t *testing.T, sessionID, remotePath, localPath string) error {
 	t.Logf("Downloading file from %s to %s", remotePath, localPath)
-	client := getClient()
+	client := getClient(t.Context())
 	return client.SSHDownloadFile(sessionID, remotePath, localPath)
 }
 
 func listDirectory(t *testing.T, sessionID, path string) error {
 	t.Logf("Listing directory: %s", path)
-	client := getClient()
+	client := getClient(t.Context())
 	listing, err := client.SSHListDirectory(sessionID, path)
 	if err != nil {
 		return err
@@ -177,7 +177,7 @@ func listDirectory(t *testing.T, sessionID, path string) error {
 
 func verifyFileContent(t *testing.T, sessionID, remotePath, expectedContent string) error {
 	t.Logf("Verifying content of file: %s", remotePath)
-	client := getClient()
+	client := getClient(t.Context())
 	// Use cat command to get file content
 	output, err := client.SSHExecuteCommand(sessionID, "cat "+remotePath)
 	if err != nil {
@@ -192,6 +192,6 @@ func verifyFileContent(t *testing.T, sessionID, remotePath, expectedContent stri
 
 func disconnectSSH(t *testing.T, sessionID string) error {
 	t.Logf("Disconnecting session: %s", sessionID)
-	client := getClient()
+	client := getClient(t.Context())
 	return client.SSHDisconnect(sessionID)
 }
