@@ -206,9 +206,6 @@ func (o *Operations) UploadDir(sessionID, localDir, remoteDir string) error {
 			}
 
 			fmt.Fprintln(w, "E")
-			if err := checkSCPStatus(r); err != nil {
-				return err
-			}
 		} else {
 			// Trailing slash, just upload the contents
 			if err := uploadEntries(); err != nil {
@@ -251,7 +248,7 @@ func (o *Operations) DownloadDir(sessionID, remotePath, localPath string) error 
 			return err
 		}
 
-		return scpDownloadDir(localPath, w, r)
+		return scpDownloadDir(localPath, w, r, true)
 	}
 
 	cmd := fmt.Sprintf("scp -rf %s", remotePath)
@@ -327,11 +324,6 @@ func (o *Operations) scpSession(sess *session.Session, scpCommand string, f func
 
 // scpUploadFile uploads a file using the SCP protocol
 func scpUploadFile(filename string, src io.Reader, w io.Writer, r *bufio.Reader, size int64) error {
-	// Read initial status byte from server
-	if err := checkSCPStatus(r); err != nil {
-		return fmt.Errorf("initial protocol handshake failed: %v", err)
-	}
-
 	// If size is 0, we need to create a temporary file to determine the actual size
 	if size == 0 {
 		// Create a temporary file where we can copy the contents of the src
@@ -420,7 +412,7 @@ func checkSCPStatus(r *bufio.Reader) error {
 }
 
 // scpDownloadDir recursively downloads a directory.
-func scpDownloadDir(destPath string, w io.Writer, r *bufio.Reader) error {
+func scpDownloadDir(destPath string, w io.Writer, r *bufio.Reader, stripName bool) error {
 	for {
 		header, err := r.ReadString('\n')
 		if err != nil {
@@ -438,11 +430,11 @@ func scpDownloadDir(destPath string, w io.Writer, r *bufio.Reader) error {
 		switch header[0] {
 		case 'E':
 			// End of directory marker
-			return nil
+			return ackSCP(w)
 		case 'T':
 			// Timestamp, which we ignore.
 			// Acknowledge it and continue.
-			if _, err := w.Write([]byte{0}); err != nil {
+			if err := ackSCP(w); err != nil {
 				return err
 			}
 			continue
@@ -461,7 +453,7 @@ func scpDownloadDir(destPath string, w io.Writer, r *bufio.Reader) error {
 			name := strings.TrimRight(parts[2], "\n")
 
 			// Acknowledge header
-			if _, err := w.Write([]byte{0}); err != nil {
+			if err := ackSCP(w); err != nil {
 				return err
 			}
 
@@ -474,9 +466,12 @@ func scpDownloadDir(destPath string, w io.Writer, r *bufio.Reader) error {
 
 			// Copy contents
 			_, err = io.CopyN(file, r, size)
-			file.Close()
 			if err != nil {
 				return err
+			}
+			err = file.Close()
+			if err != nil {
+				return fmt.Errorf("failed to close file %s: %v", filePath, err)
 			}
 
 			// Check status byte
@@ -485,7 +480,7 @@ func scpDownloadDir(destPath string, w io.Writer, r *bufio.Reader) error {
 			}
 
 			// Acknowledge file transfer
-			if _, err := w.Write([]byte{0}); err != nil {
+			if err := ackSCP(w); err != nil {
 				return err
 			}
 		case 'D':
@@ -498,18 +493,21 @@ func scpDownloadDir(destPath string, w io.Writer, r *bufio.Reader) error {
 			name := strings.TrimRight(parts[2], "\n")
 
 			// Acknowledge header
-			if _, err := w.Write([]byte{0}); err != nil {
+			if err := ackSCP(w); err != nil {
 				return err
 			}
 
 			// Create directory
-			dirPath := filepath.Join(destPath, name)
+			dirPath := destPath
+			if !stripName {
+				dirPath = filepath.Join(destPath, name)
+			}
 			if err := os.MkdirAll(dirPath, 0755); err != nil {
 				return err
 			}
 
 			// Recursively download directory contents
-			if err := scpDownloadDir(dirPath, w, r); err != nil {
+			if err := scpDownloadDir(dirPath, w, r, false); err != nil {
 				return err
 			}
 		case 1, 2: // Warning or error message
@@ -519,6 +517,14 @@ func scpDownloadDir(destPath string, w io.Writer, r *bufio.Reader) error {
 			return fmt.Errorf("unsupported scp command: %q", header)
 		}
 	}
+}
+
+func ackSCP(w io.Writer) error {
+	// Acknowledge the SCP command by sending a null byte
+	if _, err := w.Write([]byte{0}); err != nil {
+		return fmt.Errorf("failed to acknowledge SCP command: %v", err)
+	}
+	return nil
 }
 
 // scpUploadDirProtocol initiates a directory upload in the SCP protocol
@@ -534,8 +540,7 @@ func scpUploadDirProtocol(dirName string, w io.Writer, r *bufio.Reader, f func()
 		return err
 	}
 
-	fmt.Fprintln(w, "E")
-	err = checkSCPStatus(r)
+	_, err = fmt.Fprintln(w, "E")
 	if err != nil {
 		return err
 	}
