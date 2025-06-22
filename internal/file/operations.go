@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -146,6 +147,117 @@ func (o *Operations) Download(sessionID, remotePath, localPath string) error {
 	return o.scpSession(sess, cmd, scpFunc)
 }
 
+// UploadDir uploads a local directory to the remote server
+func (o *Operations) UploadDir(sessionID, localDir, remoteDir string) error {
+	// Get the session from the manager
+	sess, err := o.sessionManager.GetSession(sessionID)
+	if err != nil {
+		return err
+	}
+
+	// Convert remote path to forward slashes for compatibility with Unix systems
+	remoteDir = filepath.ToSlash(remoteDir)
+
+	// Define the SCP upload directory function
+	scpFunc := func(w io.Writer, r *bufio.Reader) error {
+		// Read initial status byte from server
+		code, err := r.ReadByte()
+		if err != nil {
+			return fmt.Errorf("failed to read status: %v", err)
+		}
+		if code != 0 {
+			message, _, err := r.ReadLine()
+			if err != nil {
+				return fmt.Errorf("error reading error message: %v", err)
+			}
+			return errors.New(string(message))
+		}
+
+		// Open the source directory
+		f, err := os.Open(localDir)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		// Read all entries in the directory
+		entries, err := f.Readdir(-1)
+		if err != nil {
+			return err
+		}
+
+		// Upload the directory
+		uploadEntries := func() error {
+			return scpUploadDirEntries(localDir, entries, w, r)
+		}
+
+		if localDir[len(localDir)-1] != '/' {
+			// No trailing slash, so include the directory name
+			log.Printf("[DEBUG] SCP: starting directory upload: %s", filepath.Base(localDir))
+
+			// Use Fprintln with proper spacing exactly as in the example
+			fmt.Fprintln(w, "D0755 0", filepath.Base(localDir))
+			if err := checkSCPStatus(r); err != nil {
+				return err
+			}
+
+			if err := uploadEntries(); err != nil {
+				return err
+			}
+
+			fmt.Fprintln(w, "E")
+			if err := checkSCPStatus(r); err != nil {
+				return err
+			}
+		} else {
+			// Trailing slash, just upload the contents
+			if err := uploadEntries(); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}
+
+	// Execute the SCP command
+	cmd := fmt.Sprintf("scp -vrt %s", remoteDir)
+	return o.scpSession(sess, cmd, scpFunc)
+}
+
+// DownloadDir downloads a remote directory to the local machine.
+func (o *Operations) DownloadDir(sessionID, remotePath, localPath string) error {
+	sess, err := o.sessionManager.GetSession(sessionID)
+	if err != nil {
+		return err
+	}
+
+	// Ensure local path exists and is a directory.
+	fi, err := os.Stat(localPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if err := os.MkdirAll(localPath, 0755); err != nil {
+				return fmt.Errorf("failed to create local directory: %v", err)
+			}
+		} else {
+			return err
+		}
+	} else if !fi.IsDir() {
+		return fmt.Errorf("local path %s is not a directory", localPath)
+	}
+
+	scpFunc := func(w io.Writer, r *bufio.Reader) error {
+		// Signal that we're ready for the protocol to start
+		if _, err := w.Write([]byte{0}); err != nil {
+			return err
+		}
+
+		return scpDownloadDir(localPath, w, r)
+	}
+
+	cmd := fmt.Sprintf("scp -rf %s", remotePath)
+	return o.scpSession(sess, cmd, scpFunc)
+}
+
 // scpSession executes an SCP command and handles the SCP protocol
 func (o *Operations) scpSession(sess *session.Session, scpCommand string, f func(io.Writer, *bufio.Reader) error) error {
 	// Create a new SSH session
@@ -160,7 +272,14 @@ func (o *Operations) scpSession(sess *session.Session, scpCommand string, f func
 	if err != nil {
 		return fmt.Errorf("failed to get stdin pipe: %v", err)
 	}
-	defer stdinW.Close()
+
+	// We only want to close once, so we nil stdinW after we close it,
+	// and only close in the defer if it hasn't been closed already.
+	defer func() {
+		if stdinW != nil {
+			stdinW.Close()
+		}
+	}()
 
 	// Get a pipe to stdout so that we can get responses back
 	stdoutPipe, err := sshSession.StdoutPipe()
@@ -179,7 +298,16 @@ func (o *Operations) scpSession(sess *session.Session, scpCommand string, f func
 	}
 
 	// Call our callback that executes in the context of SCP
-	if err := f(stdinW, stdoutR); err != nil && err != io.EOF {
+	err = f(stdinW, stdoutR)
+
+	// Close the stdin, which sends an EOF, and then set stdinW to nil so that
+	// our defer func doesn't close it again since that is unsafe with
+	// the Go SSH package.
+	stdinW.Close()
+	stdinW = nil
+
+	// If we got an error (not EOF which is normal), return it
+	if err != nil && err != io.EOF {
 		return fmt.Errorf("SCP protocol error: %v", err)
 	}
 
@@ -199,6 +327,48 @@ func (o *Operations) scpSession(sess *session.Session, scpCommand string, f func
 
 // scpUploadFile uploads a file using the SCP protocol
 func scpUploadFile(filename string, src io.Reader, w io.Writer, r *bufio.Reader, size int64) error {
+	// Read initial status byte from server
+	if err := checkSCPStatus(r); err != nil {
+		return fmt.Errorf("initial protocol handshake failed: %v", err)
+	}
+
+	// If size is 0, we need to create a temporary file to determine the actual size
+	if size == 0 {
+		// Create a temporary file where we can copy the contents of the src
+		// so that we can determine the length, since SCP is length-prefixed.
+		tf, err := os.CreateTemp("", "ssh-mcp-upload")
+		if err != nil {
+			return fmt.Errorf("error creating temporary file for upload: %v", err)
+		}
+		defer os.Remove(tf.Name())
+		defer tf.Close()
+
+		// Copy the data to the temporary file
+		if _, err := io.Copy(tf, src); err != nil {
+			return fmt.Errorf("error copying data to temporary file: %v", err)
+		}
+
+		// Sync the file so that the contents are definitely on disk
+		if err := tf.Sync(); err != nil {
+			return fmt.Errorf("error syncing temporary file: %v", err)
+		}
+
+		// Seek the file to the beginning so we can re-read all of it
+		if _, err := tf.Seek(0, 0); err != nil {
+			return fmt.Errorf("error seeking temporary file: %v", err)
+		}
+
+		// Get the file size
+		fi, err := tf.Stat()
+		if err != nil {
+			return fmt.Errorf("error getting temporary file info: %v", err)
+		}
+
+		// Update the source and size
+		src = tf
+		size = fi.Size()
+	}
+
 	// Start the protocol
 	fmt.Fprintf(w, "C0644 %d %s\n", size, filename)
 	if err := checkSCPStatus(r); err != nil {
@@ -213,6 +383,13 @@ func scpUploadFile(filename string, src io.Reader, w io.Writer, r *bufio.Reader,
 	// Send file transfer completion
 	if _, err := w.Write([]byte{0}); err != nil {
 		return fmt.Errorf("failed to send file transfer completion: %v", err)
+	}
+
+	// Flush any buffered data
+	if flusher, ok := w.(interface{ Flush() error }); ok {
+		if err := flusher.Flush(); err != nil {
+			return fmt.Errorf("failed to flush data: %v", err)
+		}
 	}
 
 	// Check for SCP acknowledgment
@@ -237,6 +414,199 @@ func checkSCPStatus(r *bufio.Reader) error {
 			return fmt.Errorf("error reading error message: %v", err)
 		}
 		return errors.New(string(message))
+	}
+
+	return nil
+}
+
+// scpDownloadDir recursively downloads a directory.
+func scpDownloadDir(destPath string, w io.Writer, r *bufio.Reader) error {
+	for {
+		header, err := r.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				return nil // Clean exit
+			}
+			return err
+		}
+
+		// The protocol can end with an empty line from the server.
+		if header == "" {
+			return nil
+		}
+
+		switch header[0] {
+		case 'E':
+			// End of directory marker
+			return nil
+		case 'T':
+			// Timestamp, which we ignore.
+			// Acknowledge it and continue.
+			if _, err := w.Write([]byte{0}); err != nil {
+				return err
+			}
+			continue
+		case 'C':
+			// File transfer
+			parts := strings.SplitN(header, " ", 3)
+			if len(parts) != 3 {
+				return fmt.Errorf("invalid file header: %q", header)
+			}
+
+			size, err := strconv.ParseInt(parts[1], 10, 64)
+			if err != nil {
+				return fmt.Errorf("invalid file size in header: %v", err)
+			}
+
+			name := strings.TrimRight(parts[2], "\n")
+
+			// Acknowledge header
+			if _, err := w.Write([]byte{0}); err != nil {
+				return err
+			}
+
+			// Create file
+			filePath := filepath.Join(destPath, name)
+			file, err := os.Create(filePath)
+			if err != nil {
+				return err
+			}
+
+			// Copy contents
+			_, err = io.CopyN(file, r, size)
+			file.Close()
+			if err != nil {
+				return err
+			}
+
+			// Check status byte
+			if err := checkSCPStatus(r); err != nil {
+				return err
+			}
+
+			// Acknowledge file transfer
+			if _, err := w.Write([]byte{0}); err != nil {
+				return err
+			}
+		case 'D':
+			// Directory transfer
+			parts := strings.SplitN(header, " ", 3)
+			if len(parts) != 3 {
+				return fmt.Errorf("invalid directory header: %q", header)
+			}
+
+			name := strings.TrimRight(parts[2], "\n")
+
+			// Acknowledge header
+			if _, err := w.Write([]byte{0}); err != nil {
+				return err
+			}
+
+			// Create directory
+			dirPath := filepath.Join(destPath, name)
+			if err := os.MkdirAll(dirPath, 0755); err != nil {
+				return err
+			}
+
+			// Recursively download directory contents
+			if err := scpDownloadDir(dirPath, w, r); err != nil {
+				return err
+			}
+		case 1, 2: // Warning or error message
+			// The message is the line itself. We can just ignore it.
+			continue
+		default:
+			return fmt.Errorf("unsupported scp command: %q", header)
+		}
+	}
+}
+
+// scpUploadDirProtocol initiates a directory upload in the SCP protocol
+func scpUploadDirProtocol(dirName string, w io.Writer, r *bufio.Reader, f func() error) error {
+	log.Printf("[DEBUG] SCP: starting directory upload: %s", dirName)
+	fmt.Fprintln(w, "D0755 0", dirName)
+	err := checkSCPStatus(r)
+	if err != nil {
+		return err
+	}
+
+	if err := f(); err != nil {
+		return err
+	}
+
+	fmt.Fprintln(w, "E")
+	err = checkSCPStatus(r)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// scpUploadDirEntries uploads the entries of a directory using SCP protocol
+func scpUploadDirEntries(root string, entries []os.FileInfo, w io.Writer, r *bufio.Reader) error {
+	for _, entry := range entries {
+		localPath := filepath.Join(root, entry.Name())
+
+		// Check if this is a symlink to a directory
+		isSymlinkToDir := false
+		if entry.Mode()&os.ModeSymlink == os.ModeSymlink {
+			// Resolve the symlink
+			symPath, err := filepath.EvalSymlinks(localPath)
+			if err != nil {
+				return err
+			}
+
+			// Check if it points to a directory
+			symInfo, err := os.Lstat(symPath)
+			if err != nil {
+				return err
+			}
+
+			isSymlinkToDir = symInfo.IsDir()
+		}
+
+		if !entry.IsDir() && !isSymlinkToDir {
+			// It's a regular file or symlink to a file
+			file, err := os.Open(localPath)
+			if err != nil {
+				return err
+			}
+
+			err = func() error {
+				defer file.Close()
+				return scpUploadFile(entry.Name(), file, w, r, entry.Size())
+			}()
+
+			if err != nil {
+				return err
+			}
+
+			continue
+		}
+
+		// It's a directory or symlink to directory, upload recursively
+		err := scpUploadDirProtocol(entry.Name(), w, r, func() error {
+			// Open the directory
+			f, err := os.Open(localPath)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+
+			// Read the directory entries
+			subEntries, err := f.Readdir(-1)
+			if err != nil {
+				return err
+			}
+
+			// Upload the entries
+			return scpUploadDirEntries(localPath, subEntries, w, r)
+		})
+
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil

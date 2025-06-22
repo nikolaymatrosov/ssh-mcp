@@ -149,6 +149,36 @@ func (c *MCPClient) SSHListDirectory(sessionID, path string) (string, error) {
 	return "", fmt.Errorf("failed to get directory listing from response")
 }
 
+// SSHUploadDir uploads a directory to the SSH server
+func (c *MCPClient) SSHUploadDir(sessionID, localDir, remoteDir string) error {
+	// Create the request payload
+	payload := map[string]interface{}{
+		"sessionId":   sessionID,
+		"source":      localDir,
+		"destination": remoteDir,
+	}
+
+	// Call the SSH upload directory tool
+	_, err := c.client.CallTool(context.Background(), "ssh_upload_directory", payload)
+	return err
+}
+
+// SSHDownloadDir downloads a directory from the SSH server
+func (c *MCPClient) SSHDownloadDir(sessionID, remoteDir, localDir string) error {
+	// Create the request payload
+	payload := map[string]interface{}{
+		"sessionId":   sessionID,
+		"source":      remoteDir,
+		"destination": localDir,
+		"direction":   "download",
+		"isDirectory": true,
+	}
+
+	// Call the SSH download directory tool
+	_, err := c.client.CallTool(context.Background(), "ssh_download_directory", payload)
+	return err
+}
+
 // SSHDisconnect disconnects from the SSH server
 func (c *MCPClient) SSHDisconnect(sessionID string) error {
 	// Create the request payload

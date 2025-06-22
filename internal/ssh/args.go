@@ -25,6 +25,20 @@ type SSHFileTransferArgs struct {
 	Direction   string `json:"direction" jsonschema:"description=Transfer direction (upload or download),required,enum=upload,enum=download"`
 }
 
+// SSHDirectoryUploadArgs defines the arguments for uploading directories over SSH
+type SSHDirectoryUploadArgs struct {
+	SessionID   string `json:"sessionId" jsonschema:"description=The SSH session identifier,required"`
+	Source      string `json:"source" jsonschema:"description=Source directory path on local machine,required"`
+	Destination string `json:"destination" jsonschema:"description=Destination directory path on remote server,required"`
+}
+
+// SSHDirectoryDownloadArgs defines the arguments for downloading directories over SSH
+type SSHDirectoryDownloadArgs struct {
+	SessionID   string `json:"sessionId" jsonschema:"description=The SSH session identifier,required"`
+	Source      string `json:"source" jsonschema:"description=Source directory path on remote server,required"`
+	Destination string `json:"destination" jsonschema:"description=Destination directory path on local machine,required"`
+}
+
 // SSHDisconnectArgs defines the arguments for disconnecting an SSH session
 type SSHDisconnectArgs struct {
 	SessionID string `json:"sessionId" jsonschema:"description=The SSH session identifier,required"`

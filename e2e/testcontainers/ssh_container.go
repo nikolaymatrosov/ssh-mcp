@@ -30,6 +30,8 @@ func StartSSHContainer(ctx context.Context) (*SSHContainer, error) {
 		FromDockerfile: testcontainers.FromDockerfile{
 			Context:    filepath.Dir(dockerfilePath),
 			Dockerfile: "Dockerfile",
+			KeepImage:  true,
+			Repo:       "ssh-server",
 		},
 		ExposedPorts: []string{"22/tcp"},
 		WaitingFor:   wait.ForListeningPort("22/tcp").WithStartupTimeout(30 * time.Second),

@@ -126,6 +126,117 @@ func TestSSHConnection(t *testing.T) {
 	}
 }
 
+// TestSSHDirectoryOperations tests uploading and downloading directories
+func TestSSHDirectoryOperations(t *testing.T) {
+	// Start the SSH server container
+	ctx := context.Background()
+	sshContainer, err := testcontainers.StartSSHContainer(ctx)
+	if err != nil {
+		t.Fatalf("Failed to start SSH server container: %v", err)
+	}
+	defer sshContainer.Stop(ctx)
+
+	// Start the MCP server
+	mcpPort := 8081
+	mcpServer, err := testcontainers.StartMCPServer(ctx, mcpPort)
+	if err != nil {
+		t.Fatalf("Failed to start MCP server: %v", err)
+	}
+	defer mcpServer.Stop()
+
+	// Create a temporary directory for test files
+	tempDir, err := os.MkdirTemp("", "ssh-mcp-e2e-dir")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Change to the temp directory
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get current directory: %v", err)
+	}
+	defer os.Chdir(originalDir)
+	os.Chdir(tempDir)
+
+	// Create a test directory structure
+	testDirPath := path.Join(tempDir, "test-upload-dir")
+	err = os.Mkdir(testDirPath, 0755)
+	if err != nil {
+		t.Fatalf("Failed to create test directory: %v", err)
+	}
+
+	// Create some files in the test directory
+	files := map[string]string{
+		"file1.txt": "Content of file 1",
+		"file2.txt": "Content of file 2",
+		"file3.txt": "Content of file 3",
+	}
+
+	for filename, content := range files {
+		filePath := path.Join(testDirPath, filename)
+		err = os.WriteFile(filePath, []byte(content), 0644)
+		if err != nil {
+			t.Fatalf("Failed to create test file %s: %v", filename, err)
+		}
+	}
+
+	// Create a subdirectory with files
+	subDirPath := path.Join(testDirPath, "subdir")
+	err = os.Mkdir(subDirPath, 0755)
+	if err != nil {
+		t.Fatalf("Failed to create test subdirectory: %v", err)
+	}
+
+	subDirFiles := map[string]string{
+		"subfile1.txt": "Content of subdir file 1",
+		"subfile2.txt": "Content of subdir file 2",
+	}
+
+	for filename, content := range subDirFiles {
+		filePath := path.Join(subDirPath, filename)
+		err = os.WriteFile(filePath, []byte(content), 0644)
+		if err != nil {
+			t.Fatalf("Failed to create test file in subdirectory %s: %v", filename, err)
+		}
+	}
+
+	// Construct remote paths
+	remoteUploadDir := path.Join(remoteUserHome, "uploaded-dir")
+	localDownloadDir := path.Join(tempDir, "downloaded-dir")
+
+	// Connect to SSH server
+	sessionID, err := connectToSSH(t, sshContainer.Host, sshContainer.Port)
+	if err != nil {
+		t.Fatalf("Failed to connect to SSH server: %v", err)
+	}
+	defer disconnectSSH(t, sessionID)
+
+	// Test directory upload
+	err = uploadDir(t, sessionID, testDirPath, remoteUploadDir)
+	if err != nil {
+		t.Fatalf("Failed to upload directory: %v", err)
+	}
+
+	// Verify upload by checking directory structure
+	err = verifyRemoteDir(t, sessionID, remoteUploadDir)
+	if err != nil {
+		t.Fatalf("Failed to verify uploaded directory: %v", err)
+	}
+
+	// Test directory download
+	err = downloadDir(t, sessionID, remoteUploadDir, localDownloadDir)
+	if err != nil {
+		t.Fatalf("Failed to download directory: %v", err)
+	}
+
+	// Verify downloaded directory structure
+	err = verifyLocalDir(t, localDownloadDir, files, subDirFiles)
+	if err != nil {
+		t.Fatalf("Failed to verify downloaded directory: %v", err)
+	}
+}
+
 // Helper functions to interact with the SSH MCP tool
 
 // getClient returns a new MCP client
@@ -194,4 +305,125 @@ func disconnectSSH(t *testing.T, sessionID string) error {
 	t.Logf("Disconnecting session: %s", sessionID)
 	client := getClient(t.Context())
 	return client.SSHDisconnect(sessionID)
+}
+
+func uploadDir(t *testing.T, sessionID, localDir, remoteDir string) error {
+	t.Logf("Uploading directory from %s to %s", localDir, remoteDir)
+	client := getClient(t.Context())
+	return client.SSHUploadDir(sessionID, localDir, remoteDir)
+}
+
+func downloadDir(t *testing.T, sessionID, remoteDir, localDir string) error {
+	t.Logf("Downloading directory from %s to %s", remoteDir, localDir)
+	client := getClient(t.Context())
+	return client.SSHDownloadDir(sessionID, remoteDir, localDir)
+}
+
+func verifyRemoteDir(t *testing.T, sessionID, remoteDir string) error {
+	t.Logf("Verifying remote directory structure: %s", remoteDir)
+	client := getClient(t.Context())
+
+	// Check if the directory exists
+	output, err := client.SSHExecuteCommand(sessionID, fmt.Sprintf("ls -la %s", remoteDir))
+	if err != nil {
+		return fmt.Errorf("failed to list remote directory: %v", err)
+	}
+
+	// Check for expected files
+	for _, file := range []string{"file1.txt", "file2.txt", "file3.txt", "subdir"} {
+		if !strings.Contains(output, file) {
+			return fmt.Errorf("expected file/directory %s not found in remote directory", file)
+		}
+	}
+
+	// Check subdirectory
+	output, err = client.SSHExecuteCommand(sessionID, fmt.Sprintf("ls -la %s/subdir", remoteDir))
+	if err != nil {
+		return fmt.Errorf("failed to list remote subdirectory: %v", err)
+	}
+
+	// Check for expected files in subdirectory
+	for _, file := range []string{"subfile1.txt", "subfile2.txt"} {
+		if !strings.Contains(output, file) {
+			return fmt.Errorf("expected file %s not found in remote subdirectory", file)
+		}
+	}
+
+	// Verify file contents
+	files := map[string]string{
+		"file1.txt": "Content of file 1",
+		"file2.txt": "Content of file 2",
+		"file3.txt": "Content of file 3",
+	}
+
+	for filename, expectedContent := range files {
+		filePath := path.Join(remoteDir, filename)
+		err = verifyFileContent(t, sessionID, filePath, expectedContent)
+		if err != nil {
+			return fmt.Errorf("failed to verify content of %s: %v", filename, err)
+		}
+	}
+
+	// Verify subdirectory file contents
+	subDirFiles := map[string]string{
+		"subfile1.txt": "Content of subdir file 1",
+		"subfile2.txt": "Content of subdir file 2",
+	}
+
+	for filename, expectedContent := range subDirFiles {
+		filePath := path.Join(remoteDir, "subdir", filename)
+		err = verifyFileContent(t, sessionID, filePath, expectedContent)
+		if err != nil {
+			return fmt.Errorf("failed to verify content of subdirectory file %s: %v", filename, err)
+		}
+	}
+
+	return nil
+}
+
+func verifyLocalDir(t *testing.T, localDir string, expectedFiles, expectedSubdirFiles map[string]string) error {
+	t.Logf("Verifying local directory structure: %s", localDir)
+
+	// Check if the directory exists
+	_, err := os.Stat(localDir)
+	if err != nil {
+		return fmt.Errorf("failed to stat local directory: %v", err)
+	}
+
+	// Check for expected files
+	for filename, expectedContent := range expectedFiles {
+		filePath := path.Join(localDir, filename)
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			return fmt.Errorf("failed to read file %s: %v", filename, err)
+		}
+
+		if string(content) != expectedContent {
+			return fmt.Errorf("content of %s doesn't match expected: got %s, want %s",
+				filename, string(content), expectedContent)
+		}
+	}
+
+	// Check subdirectory
+	subdirPath := path.Join(localDir, "subdir")
+	_, err = os.Stat(subdirPath)
+	if err != nil {
+		return fmt.Errorf("failed to stat subdirectory: %v", err)
+	}
+
+	// Check for expected files in subdirectory
+	for filename, expectedContent := range expectedSubdirFiles {
+		filePath := path.Join(subdirPath, filename)
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			return fmt.Errorf("failed to read subdirectory file %s: %v", filename, err)
+		}
+
+		if string(content) != expectedContent {
+			return fmt.Errorf("content of subdirectory file %s doesn't match expected: got %s, want %s",
+				filename, string(content), expectedContent)
+		}
+	}
+
+	return nil
 }
