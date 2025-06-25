@@ -101,6 +101,10 @@ func (c *Client) ExecuteCommand(args SSHCommandArgs) (string, error) {
 	sshSession.Stderr = &stderr
 
 	// Execute the command with timeout
+	if args.Timeout <= 0 {
+		// Default timeout to 30 seconds if not specified
+		args.Timeout = 30
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(args.Timeout)*time.Second)
 	defer cancel()
 

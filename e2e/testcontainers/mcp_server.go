@@ -2,18 +2,20 @@ package testcontainers
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
 	"ssh-mcp/internal/server"
 
-	mcp_golang "github.com/metoro-io/mcp-golang"
+	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
 // MCPServer represents an SSH MCP server
 type MCPServer struct {
-	server   *mcp_golang.Server
-	stopChan chan struct{}
+	server     *mcpserver.MCPServer
+	httpServer *mcpserver.StreamableHTTPServer
+	stopChan   chan struct{}
 }
 
 // StartMCPServer starts an SSH MCP server on the specified port
@@ -31,6 +33,9 @@ func StartMCPServer(ctx context.Context, port int) (*MCPServer, error) {
 	// Create a channel to signal when to stop the server
 	stopChan := make(chan struct{})
 
+	// Create HTTP server
+	httpServer := mcpserver.NewStreamableHTTPServer(mcpServer)
+
 	// Start the server in a goroutine
 	go func() {
 		log.Printf("Starting SSH-MCP server on :%d...", port)
@@ -39,7 +44,11 @@ func StartMCPServer(ctx context.Context, port int) (*MCPServer, error) {
 		time.Sleep(100 * time.Millisecond)
 
 		// Start the server
-		mcpServer.Serve()
+		addr := fmt.Sprintf(":%d", port)
+		err := httpServer.Start(addr)
+		if err != nil {
+			log.Printf("Error starting server: %v", err)
+		}
 
 		// The server will run until the stopChan is closed
 		<-stopChan
@@ -49,12 +58,17 @@ func StartMCPServer(ctx context.Context, port int) (*MCPServer, error) {
 	time.Sleep(200 * time.Millisecond)
 
 	return &MCPServer{
-		server:   mcpServer,
-		stopChan: stopChan,
+		server:     mcpServer,
+		httpServer: httpServer,
+		stopChan:   stopChan,
 	}, nil
 }
 
 // Stop stops the SSH MCP server
 func (s *MCPServer) Stop() {
+	// Close the stop channel to signal the goroutine to exit
 	close(s.stopChan)
+
+	// Give the server a moment to shut down
+	time.Sleep(100 * time.Millisecond)
 }

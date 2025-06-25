@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"time"
 
-	mcp_golang "github.com/metoro-io/mcp-golang"
-	mcp_http "github.com/metoro-io/mcp-golang/transport/http"
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 
 	"ssh-mcp/internal/security"
 	"ssh-mcp/internal/session"
@@ -32,38 +34,75 @@ func DefaultConfig() Config {
 }
 
 // SetupServer creates and configures an MCP server with SSH tools
-func SetupServer(config Config) (*mcp_golang.Server, *session.Manager, error) {
-	// Create an HTTP transport that listens on /mcp endpoint
-	transport := mcp_http.NewHTTPTransport("/mcp").WithAddr(fmt.Sprintf(":%d", config.Port))
-
-	// Create a new server with the transport
-	server := mcp_golang.NewServer(
-		transport,
-		mcp_golang.WithName("ssh-mcp"),
-		mcp_golang.WithInstructions("SSH client with MCP interface"),
-		mcp_golang.WithVersion("0.1.0"),
-	)
-
+func SetupServer(config Config) (*server.MCPServer, *session.Manager, error) {
 	// Initialize components
 	sessionManager := session.NewManager(config.SessionExpiry)
 	sessionManager.StartCleanupRoutine(config.CleanupInterval)
 
 	securityManager := security.NewManager(security.Config{
 		LoggingEnabled: config.LoggingEnabled,
-		RateLimit:      config.RateLimit,
+		//RateLimit:      config.RateLimit,
 	})
 	securityManager.StartCleanupRoutine(config.CleanupInterval, config.SessionExpiry)
+
+	// Create hooks for logging and security
+	hooks := &server.Hooks{}
+
+	if config.LoggingEnabled {
+		hooks.AddBeforeAny(func(ctx context.Context, id any, method mcp.MCPMethod, message any) {
+			fmt.Printf("Request: %s, %v, %v\n", method, id, message)
+		})
+		hooks.AddOnSuccess(func(ctx context.Context, id any, method mcp.MCPMethod, message any, result any) {
+			fmt.Printf("Success: %s, %v, %v, %v\n", method, id, message, result)
+		})
+		hooks.AddOnError(func(ctx context.Context, id any, method mcp.MCPMethod, message any, err error) {
+			fmt.Printf("Error: %s, %v, %v, %v\n", method, id, message, err)
+		})
+	}
+
+	// Create a new server
+	mcpServer := server.NewMCPServer(
+		"ssh-mcp",
+		"0.1.0",
+		server.WithToolCapabilities(true),
+		server.WithLogging(),
+		server.WithHooks(hooks),
+	)
 
 	// Get all tools
 	tools := GetTools(sessionManager, securityManager)
 
 	// Register all tools
 	for _, tool := range tools {
-		err := server.RegisterTool(tool.Name, tool.Description, tool.Handler)
-		if err != nil {
-			return nil, nil, err
-		}
+		mcpTool := mcp.NewTool(
+			tool.Name,
+			tool.Opts...,
+		)
+
+		mcpServer.AddTool(mcpTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			// Convert the handler to the new format
+			handler, ok := tool.Handler.(func(args map[string]interface{}) (*mcp.CallToolResult, error))
+			if !ok {
+				return nil, fmt.Errorf("invalid handler for tool %s", tool.Name)
+			}
+
+			return handler(request.GetArguments())
+		})
 	}
 
-	return server, sessionManager, nil
+	return mcpServer, sessionManager, nil
+}
+
+// StartHTTPServer starts the MCP server with HTTP transport
+func StartHTTPServer(mcpServer *server.MCPServer, port int) error {
+	httpServer := server.NewStreamableHTTPServer(mcpServer)
+	addr := fmt.Sprintf(":%d", port)
+	log.Printf("HTTP server listening on %s/mcp", addr)
+	return httpServer.Start(addr)
+}
+
+// StartStdioServer starts the MCP server with stdio transport
+func StartStdioServer(mcpServer *server.MCPServer) error {
+	log.Printf("Starting stdio server")
+	return server.ServeStdio(mcpServer)
 }

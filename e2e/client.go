@@ -5,36 +5,45 @@ import (
 	"fmt"
 	"strings"
 
-	mcp_golang "github.com/metoro-io/mcp-golang"
-	"github.com/metoro-io/mcp-golang/transport/http"
+	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
+	"github.com/mark3labs/mcp-go/mcp"
 )
 
 // MCPClient is a client for the SSH MCP tool
 type MCPClient struct {
 	baseURL string
-	client  *mcp_golang.Client
+	client  *client.Client
 }
 
 // NewMCPClient creates a new MCP client
 func NewMCPClient(ctx context.Context, baseURL string) *MCPClient {
-	// The baseURL is expected to include "/mcp", but we need to remove it
-	// for the transport since it will add it back
-	baseURLWithoutMCP := strings.TrimSuffix(baseURL, "/mcp")
-
 	// Create an HTTP transport that connects to the server
-	transport := http.NewHTTPClientTransport("/mcp")
-	transport.WithBaseURL(baseURLWithoutMCP)
+	httpTransport, err := transport.NewStreamableHTTP(baseURL)
+	if err != nil {
+		panic(fmt.Errorf("failed to create HTTP transport: %v", err))
+	}
 
 	// Create a new client with the transport
-	client := mcp_golang.NewClient(transport)
-	_, err := client.Initialize(ctx)
+	c := client.NewClient(httpTransport)
+
+	// Initialize the client
+	initRequest := mcp.InitializeRequest{}
+	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+	initRequest.Params.ClientInfo = mcp.Implementation{
+		Name:    "SSH-MCP Client",
+		Version: "1.0.0",
+	}
+	initRequest.Params.Capabilities = mcp.ClientCapabilities{}
+
+	_, err = c.Initialize(ctx, initRequest)
 	if err != nil {
-		panic(err)
+		panic(fmt.Errorf("failed to initialize client: %v", err))
 	}
 
 	return &MCPClient{
 		baseURL: baseURL,
-		client:  client,
+		client:  c,
 	}
 }
 
@@ -49,8 +58,14 @@ func (c *MCPClient) SSHConnect(host string, port int, username, password string)
 		"timeout":  10,
 	}
 
+	// Create a CallToolRequest
+	request := mcp.CallToolRequest{}
+	request.Params.Name = "ssh_connect"
+	request.Params.Arguments = payload
+
 	// Call the SSH connect tool
-	response, err := c.client.CallTool(context.Background(), "ssh_connect", payload)
+	ctx := context.Background()
+	response, err := c.client.CallTool(ctx, request)
 	if err != nil {
 		return "", err
 	}
@@ -58,12 +73,14 @@ func (c *MCPClient) SSHConnect(host string, port int, username, password string)
 	// Extract the session ID from the response
 	// The response format is "Connected. Session ID: <session-id>"
 	sessionID := ""
-	if len(response.Content) > 0 && response.Content[0].TextContent != nil {
-		content := response.Content[0].TextContent.Text
-		// Parse the session ID from the content
-		parts := strings.Split(content, "Session ID: ")
-		if len(parts) > 1 {
-			sessionID = strings.TrimSpace(parts[1])
+	if len(response.Content) > 0 {
+		content, ok := response.Content[0].(mcp.TextContent)
+		if ok {
+			// Parse the session ID from the content
+			parts := strings.Split(content.Text, "Session ID: ")
+			if len(parts) > 1 {
+				sessionID = strings.TrimSpace(parts[1])
+			}
 		}
 	}
 
@@ -83,15 +100,24 @@ func (c *MCPClient) SSHExecuteCommand(sessionID, command string) (string, error)
 		"timeout":   30,
 	}
 
+	// Create a CallToolRequest
+	request := mcp.CallToolRequest{}
+	request.Params.Name = "ssh_execute"
+	request.Params.Arguments = payload
+
 	// Call the SSH execute tool
-	response, err := c.client.CallTool(context.Background(), "ssh_execute", payload)
+	ctx := context.Background()
+	response, err := c.client.CallTool(ctx, request)
 	if err != nil {
 		return "", err
 	}
 
 	// Extract the command output from the response
-	if len(response.Content) > 0 && response.Content[0].TextContent != nil {
-		return response.Content[0].TextContent.Text, nil
+	if len(response.Content) > 0 {
+		content, ok := response.Content[0].(mcp.TextContent)
+		if ok {
+			return content.Text, nil
+		}
 	}
 
 	return "", fmt.Errorf("failed to get command output from response")
@@ -107,8 +133,14 @@ func (c *MCPClient) SSHUploadFile(sessionID, localPath, remotePath string) error
 		"direction":   "upload",
 	}
 
+	// Create a CallToolRequest
+	request := mcp.CallToolRequest{}
+	request.Params.Name = "ssh_upload_file"
+	request.Params.Arguments = payload
+
 	// Call the SSH upload file tool
-	_, err := c.client.CallTool(context.Background(), "ssh_upload_file", payload)
+	ctx := context.Background()
+	_, err := c.client.CallTool(ctx, request)
 	return err
 }
 
@@ -122,8 +154,14 @@ func (c *MCPClient) SSHDownloadFile(sessionID, remotePath, localPath string) err
 		"direction":   "download",
 	}
 
+	// Create a CallToolRequest
+	request := mcp.CallToolRequest{}
+	request.Params.Name = "ssh_download_file"
+	request.Params.Arguments = payload
+
 	// Call the SSH download file tool
-	_, err := c.client.CallTool(context.Background(), "ssh_download_file", payload)
+	ctx := context.Background()
+	_, err := c.client.CallTool(ctx, request)
 	return err
 }
 
@@ -135,15 +173,24 @@ func (c *MCPClient) SSHListDirectory(sessionID, path string) (string, error) {
 		"path":      path,
 	}
 
+	// Create a CallToolRequest
+	request := mcp.CallToolRequest{}
+	request.Params.Name = "ssh_list_directory"
+	request.Params.Arguments = payload
+
 	// Call the SSH list directory tool
-	response, err := c.client.CallTool(context.Background(), "ssh_list_directory", payload)
+	ctx := context.Background()
+	response, err := c.client.CallTool(ctx, request)
 	if err != nil {
 		return "", err
 	}
 
 	// Extract the directory listing from the response
-	if len(response.Content) > 0 && response.Content[0].TextContent != nil {
-		return response.Content[0].TextContent.Text, nil
+	if len(response.Content) > 0 {
+		content, ok := response.Content[0].(mcp.TextContent)
+		if ok {
+			return content.Text, nil
+		}
 	}
 
 	return "", fmt.Errorf("failed to get directory listing from response")
@@ -158,8 +205,14 @@ func (c *MCPClient) SSHUploadDir(sessionID, localDir, remoteDir string) error {
 		"destination": remoteDir,
 	}
 
+	// Create a CallToolRequest
+	request := mcp.CallToolRequest{}
+	request.Params.Name = "ssh_upload_directory"
+	request.Params.Arguments = payload
+
 	// Call the SSH upload directory tool
-	_, err := c.client.CallTool(context.Background(), "ssh_upload_directory", payload)
+	ctx := context.Background()
+	_, err := c.client.CallTool(ctx, request)
 	return err
 }
 
@@ -174,8 +227,14 @@ func (c *MCPClient) SSHDownloadDir(sessionID, remoteDir, localDir string) error 
 		"isDirectory": true,
 	}
 
+	// Create a CallToolRequest
+	request := mcp.CallToolRequest{}
+	request.Params.Name = "ssh_download_directory"
+	request.Params.Arguments = payload
+
 	// Call the SSH download directory tool
-	_, err := c.client.CallTool(context.Background(), "ssh_download_directory", payload)
+	ctx := context.Background()
+	_, err := c.client.CallTool(ctx, request)
 	return err
 }
 
@@ -186,7 +245,13 @@ func (c *MCPClient) SSHDisconnect(sessionID string) error {
 		"sessionId": sessionID,
 	}
 
+	// Create a CallToolRequest
+	request := mcp.CallToolRequest{}
+	request.Params.Name = "ssh_disconnect"
+	request.Params.Arguments = payload
+
 	// Call the SSH disconnect tool
-	_, err := c.client.CallTool(context.Background(), "ssh_disconnect", payload)
+	ctx := context.Background()
+	_, err := c.client.CallTool(ctx, request)
 	return err
 }
