@@ -20,18 +20,12 @@ SSH MCP is a tool that provides SSH functionality through an MCP (Machine Commun
   - `session/`: Session management
   - `file/`: File operations
   - `security/`: Security features
+  - `server/`: MCP server implementation
 - `e2e/`: End-to-end tests
-- `.devcontainer/`: Development container configuration
 
 ## Development and Testing
 
 This project uses testcontainers for end-to-end testing with a real SSH server.
-
-### Dev Container Setup
-
-The project includes a dev container configuration in the `.devcontainer` directory that can be used for development. This is optional and not required for running the tests.
-
-For more details, see [.devcontainer/README.md](.devcontainer/README.md).
 
 ### End-to-End Testing
 
@@ -52,10 +46,17 @@ For more details, see [e2e/README.md](e2e/README.md).
 2. Start the SSH MCP server:
 
 ```bash
+# Start with HTTP transport (default)
 go run main.go
+
+# Or specify the transport explicitly
+go run main.go -t http
+
+# Start with stdio transport
+go run main.go -t stdio
 ```
 
-The server will start on port 8081.
+When using HTTP transport, the server will start on port 8081.
 
 ### Running the Tests
 
@@ -81,5 +82,7 @@ The SSH MCP tool provides the following tools:
 - `ssh_upload_file`: Upload a file to the SSH server
 - `ssh_download_file`: Download a file from the SSH server
 - `ssh_list_directory`: List contents of a directory on the SSH server
+- `ssh_upload_directory`: Upload a directory to the SSH server
+- `ssh_download_directory`: Download a directory from the SSH server
 
-These tools can be accessed through the MCP interface at `http://localhost:8081/mcp`.
+These tools can be accessed through the MCP interface at `http://localhost:8081/mcp` (HTTP transport) or via standard input/output (stdio transport).
